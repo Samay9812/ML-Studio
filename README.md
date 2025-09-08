@@ -172,5 +172,5 @@ This project demonstrates how **advanced machine learning** can be made **access
 1. Clone repository:
    ```bash
    git clone https://https://github.com/Samay9812/ML-Studio.git
-   cd ML-Studio
+   cd data_preview_app
 
