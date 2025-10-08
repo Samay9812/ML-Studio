@@ -8,6 +8,8 @@ import os
 import warnings
 import pickle
 from datetime import datetime
+from category_encoders import TargetEncoder
+import operator
 
 # Try to import all sklearn components
 try:
@@ -71,6 +73,23 @@ try:
 except ImportError:
     CATBOOST_AVAILABLE = False
 
+# Initialize session state for df, history, and redo
+if 'df' not in st.session_state:
+    st.session_state.df = None
+if 'history' not in st.session_state:
+    st.session_state.history = []
+if 'redo_stack' not in st.session_state:
+    st.session_state.redo_stack = []
+
+# Central function to update df with history tracking
+def update_df(new_df):
+    """Update the dataframe while keeping history for undo/redo."""
+    if st.session_state.df is not None:
+        st.session_state.history.append(st.session_state.df.copy())  # save current state
+    st.session_state.redo_stack = []  # clear redo stack on new action
+    st.session_state.df = new_df
+
+
 
 warnings.filterwarnings('ignore')
 
@@ -82,7 +101,7 @@ sns.set_palette("husl")
 # Page Config
 # ================================
 st.set_page_config(page_title="Data Prep + EDA + AI Assistant", page_icon="📊", layout="wide")
-st.title("📊 Data Preparation + EDA + AI Assistant")
+st.title("📊 ML-Studio")
 st.markdown("Upload your dataset, check data quality, clean data, explore visually, and get AI insights!")
 
 # ================================
@@ -1408,7 +1427,7 @@ if uploaded_file:
         with st.spinner("Loading dataset..."):
             df = load_data(uploaded_file)
             if df is not None:
-                st.session_state.df = df
+                update_df(df)
                 st.session_state.original_df = df.copy()
                 st.session_state.current_file = uploaded_file.name
                 st.success(f"✅ Successfully loaded {uploaded_file.name}")
@@ -1416,6 +1435,40 @@ if uploaded_file:
                 st.stop()
 
 df = st.session_state.get('df')
+
+# ⬅️ ADDED: Initialize history and redo stack if not already
+if 'df' not in st.session_state:
+    st.session_state.df = None
+if 'history' not in st.session_state:
+    st.session_state.history = []
+if 'redo_stack' not in st.session_state:
+    st.session_state.redo_stack = []
+
+# ⬅️ ADDED: Central function to update df with history tracking
+def update_df(new_df):
+    """Update the dataframe while keeping history for undo/redo."""
+    if st.session_state.df is not None:
+        st.session_state.history.append(st.session_state.df.copy())  # save current state
+    st.session_state.redo_stack = []  # clear redo stack on new action
+    st.session_state.df = new_df
+
+# ⬅️ ADDED: Undo / Redo buttons
+undo_col, redo_col = st.columns([1, 1])
+with undo_col:
+    if st.button("↩️ Undo"):
+        if st.session_state.history:
+            st.session_state.redo_stack.append(st.session_state.df.copy())
+            st.session_state.df = st.session_state.history.pop()
+        else:
+            st.info("Nothing to undo")
+
+with redo_col:
+    if st.button("↪️ Redo"):
+        if st.session_state.redo_stack:
+            st.session_state.history.append(st.session_state.df.copy())
+            st.session_state.df = st.session_state.redo_stack.pop()
+        else:
+            st.info("Nothing to redo")
 
 if df is not None:
     # Get column types
@@ -1517,23 +1570,73 @@ if df is not None:
     view_col1, view_col2 = st.columns([1, 3])
     
     with view_col1:
+        # Limit slider max
         max_rows = min(len(df), 1000)
         num_rows = st.slider("Number of rows to display", 1, max_rows, min(10, len(df)))
         view_option = st.selectbox("View Option", ["Top Rows", "Bottom Rows", "Random Sample"])
-        
+
+        # Sorting options
+        sort_column = st.selectbox("Sort by column", options=[None] + list(df.columns))  # None = no sort
+        sort_order = st.radio("Sort order", ["Ascending", "Descending"])
+
     with view_col2:
         if st.button("📄 View Dataset", type="primary"):
             try:
-                if view_option == "Top Rows":
-                    display_df = df.head(num_rows)
-                elif view_option == "Bottom Rows":
-                    display_df = df.tail(num_rows)
+                # Start with actual dataset
+                display_df = df.copy()
+
+                # Apply sorting to actual dataset (updates state)
+                if sort_column and sort_column in df.columns:
+                    ascending = True if sort_order == "Ascending" else False
+                    sorted_df = df.sort_values(by=sort_column, ascending=ascending).reset_index(drop=True)
+                    update_df(sorted_df)  # 🔥 Save sorted dataset
+                    display_df = sorted_df.copy()
                 else:
-                    display_df = df.sample(n=min(num_rows, len(df)), random_state=42)
-                
+                    display_df = df.copy()
+
+                # Slice rows based on view option
+                if view_option == "Top Rows":
+                    display_df = display_df.head(num_rows)
+                elif view_option == "Bottom Rows":
+                    display_df = display_df.tail(num_rows)
+                else:  # Random Sample
+                    display_df = display_df.sample(n=min(num_rows, len(display_df)), random_state=42)
+
+                # Show sorted + sliced dataframe
                 st.dataframe(display_df, use_container_width=True, hide_index=True)
+
             except Exception as e:
                 st.error(f"Error displaying data: {str(e)}")
+
+        	
+
+    # Quick Statistics
+    st.subheader("📈 Quick Statistics")
+    
+    if col_types['numeric']:
+        stats_col = st.selectbox("Select column for detailed statistics", col_types['numeric'])
+        
+        if stats_col:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**Basic Statistics:**")
+                stats = df[stats_col].describe()
+                for stat, value in stats.items():
+                    st.write(f"• {stat.title()}: {value:.2f}")
+            
+            with col2:
+                st.write("**Additional Info:**")
+                st.write(f"• Skewness: {df[stats_col].skew():.2f}")
+                st.write(f"• Kurtosis: {df[stats_col].kurtosis():.2f}")
+                st.write(f"• Missing Values: {df[stats_col].isnull().sum():,}")
+                
+                outlier_info = detect_outliers(df, stats_col)
+                if outlier_info:
+                    outlier_count = outlier_info[0]
+                    st.write(f"• Outliers (IQR method): {outlier_count:,}")
+
+
 
     # ================================
     # Data Restructuring (NEW FEATURE)
@@ -1660,7 +1763,7 @@ if df is not None:
             if drop_cols:
                 try:
                     df = df.drop(columns=drop_cols)
-                    st.session_state.df = df
+                    update_df(df)
                     st.success(f"✅ Successfully dropped columns: {', '.join(drop_cols)}")
                     col_info = render_column_info(df)
                     col_types = get_column_types(df)  # Update column types
@@ -1699,7 +1802,7 @@ if df is not None:
                 else:
                     df[col_to_change] = df[col_to_change].astype(str)
                 
-                st.session_state.df = df
+                update_df(df)
                 st.success(f"✅ Successfully converted '{col_to_change}' from {original_dtype} to {df[col_to_change].dtype}")
                 col_types = get_column_types(df)  # Update column types
                 
@@ -1722,7 +1825,7 @@ if df is not None:
             else:
                 try:
                     df = df.rename(columns={rename_col: new_name})
-                    st.session_state.df = df
+                    update_df(df)
                     st.success(f"✅ Successfully renamed '{rename_col}' to '{new_name}'")
                     col_types = get_column_types(df)  # Update column types
                 except Exception as e:
@@ -1732,16 +1835,18 @@ if df is not None:
     # Handle Data Issues
     # ================================
     st.header("6. 🔧 Handle Data Issues")
-    
-    issue_tabs = st.tabs(["Missing Values", "Duplicate Records", "Outliers", "Feature Cleaning"])
-    
-    with issue_tabs[0]:  # Missing Values
+
+    tab_missing, tab_duplicates, tab_outliers, tab_cleaning, tab_conditional = st.tabs(
+        ["Missing Values", "Duplicate Records", "Outliers", "Feature Cleaning", "Conditional Column"]
+    )
+
+    with tab_missing:  # Missing Values
         st.subheader("Missing Value Treatment")
-        
+
         # Show missing value summary
         missing_summary = df.isnull().sum()
         missing_cols = missing_summary[missing_summary > 0].index.tolist()
-        
+
         if not missing_cols:
             st.success("✅ No missing values found in the dataset")
         else:
@@ -1750,35 +1855,35 @@ if df is not None:
                 missing_count = missing_summary[col]
                 missing_pct = (missing_count / len(df)) * 100
                 st.write(f"• **{col}**: {missing_count:,} missing ({missing_pct:.1f}%)")
-            
+
             miss_col1, miss_col2 = st.columns(2)
-            
+
             with miss_col1:
                 issue_col = st.selectbox("Select column", missing_cols)
-                
+
             with miss_col2:
                 action = st.selectbox("Action", ["Remove Rows", "Impute"])
-            
+
             if action == "Impute" and issue_col:
                 if issue_col in col_types['numeric']:
                     impute_options = ["Mean", "Median", "Mode", "Forward Fill", "Backward Fill"]
                 else:
                     impute_options = ["Mode", "Forward Fill", "Backward Fill", "Constant Value"]
-                
+
                 impute_type = st.selectbox("Impute method", impute_options)
-                
+
                 if impute_type == "Constant Value":
                     const_value = st.text_input("Enter constant value")
-            
+
             if st.button("✅ Apply Missing Value Fix", type="primary"):
                 try:
                     original_len = len(df)
-                    
+
                     if action == "Remove Rows":
                         df = df.dropna(subset=[issue_col])
                         removed_rows = original_len - len(df)
                         st.success(f"✅ Removed {removed_rows:,} rows with missing values in '{issue_col}'")
-                        
+
                     elif action == "Impute":
                         if impute_type == "Mean" and issue_col in col_types['numeric']:
                             df[issue_col].fillna(df[issue_col].mean(), inplace=True)
@@ -1793,66 +1898,61 @@ if df is not None:
                             df[issue_col].fillna(method='bfill', inplace=True)
                         elif impute_type == "Constant Value" and 'const_value' in locals():
                             df[issue_col].fillna(const_value, inplace=True)
-                        
-                        filled_count = original_len - df[issue_col].isnull().sum()
+
                         st.success(f"✅ Imputed missing values in '{issue_col}' using {impute_type}")
-                    
-                    st.session_state.df = df
-                    
+
+                    update_df(df)
+
                 except Exception as e:
                     st.error(f"❌ Error handling missing values: {str(e)}")
 
-    with issue_tabs[1]:  # Duplicates (ENHANCED)
+    with tab_duplicates:  # Duplicates (ENHANCED)
         st.subheader("Duplicate Record Treatment")
-        
+
         duplicates = df.duplicated().sum()
         if duplicates == 0:
             st.success("✅ No duplicate records found")
         else:
             st.warning(f"⚠️ Found {duplicates:,} duplicate records ({duplicates/len(df)*100:.1f}% of data)")
-            
-            # NEW FEATURE: View duplicate records
+
+            # View duplicate records and actions
             view_duplicates_col, action_col = st.columns(2)
-            
+
             with view_duplicates_col:
                 if st.button("👀 View Duplicate Records", type="secondary"):
-                    # Show all duplicate records (including first occurrence)
                     duplicate_mask = df.duplicated(keep=False)
                     duplicate_records = df[duplicate_mask].sort_values(by=df.columns.tolist())
-                    
+
                     if len(duplicate_records) > 0:
                         st.write(f"**Showing all {len(duplicate_records)} duplicate records:**")
                         st.dataframe(duplicate_records, use_container_width=True)
-                        
-                        # Show duplicate groups
+
                         st.write("**Duplicate Groups Analysis:**")
-                        # Group by all columns to see which combinations are duplicated
                         duplicate_groups = duplicate_records.groupby(df.columns.tolist()).size().reset_index(name='count')
                         duplicate_groups = duplicate_groups[duplicate_groups['count'] > 1].sort_values('count', ascending=False)
-                        
+
                         if len(duplicate_groups) > 0:
                             st.write("Groups with multiple identical records:")
                             st.dataframe(duplicate_groups, use_container_width=True)
-                        
-                        # Download duplicate records
+
                         csv_data = duplicate_records.to_csv(index=True)
                         st.download_button(
-                            "📥 Download Duplicate Records", 
-                            csv_data, 
-                            "duplicate_records.csv", 
+                            "📥 Download Duplicate Records",
+                            csv_data,
+                            "duplicate_records.csv",
                             "text/csv"
                         )
-            
+
             with action_col:
                 dup_method = st.selectbox(
                     "Duplicate handling method",
                     ["Remove all duplicates", "Keep first occurrence", "Keep last occurrence", "Mark duplicates (add column)"]
                 )
-                
+
                 if st.button("🧹 Handle Duplicates", type="primary"):
                     try:
                         original_len = len(df)
-                        
+
                         if dup_method == "Remove all duplicates":
                             df = df.drop_duplicates(keep=False)
                         elif dup_method == "Keep first occurrence":
@@ -1862,76 +1962,74 @@ if df is not None:
                         elif dup_method == "Mark duplicates (add column)":
                             df['is_duplicate'] = df.duplicated(keep=False)
                             st.success(f"✅ Added 'is_duplicate' column marking {df['is_duplicate'].sum()} duplicate records")
-                            st.session_state.df = df
-                            
-                        
+
                         removed = original_len - len(df)
-                        st.session_state.df = df
+                        update_df(df)
                         st.success(f"✅ Removed {removed:,} duplicate records")
-                        
+
                     except Exception as e:
                         st.error(f"❌ Error handling duplicates: {str(e)}")
 
-    with issue_tabs[2]:  # Outliers
+    with tab_outliers:  # Outliers
         st.subheader("Outlier Treatment")
-        
+
         numeric_cols = col_types['numeric']
         if not numeric_cols:
             st.info("No numeric columns found for outlier detection")
         else:
             outlier_col = st.selectbox("Select numeric column", numeric_cols)
-            
+
             if outlier_col:
                 outlier_info = detect_outliers(df, outlier_col)
                 if outlier_info:
                     outlier_count, lower_bound, upper_bound = outlier_info
-                    
+
                     if outlier_count == 0:
                         st.success(f"✅ No outliers detected in '{outlier_col}'")
                     else:
                         st.warning(f"⚠️ Found {outlier_count:,} outliers in '{outlier_col}' ({outlier_count/len(df)*100:.1f}% of data)")
                         st.write(f"**Outlier bounds:** [{lower_bound:.2f}, {upper_bound:.2f}]")
-                        
+
                         method = st.selectbox("Treatment method", ["Remove outliers", "Cap to bounds", "Winsorize"])
-                        
+
                         if st.button("🔧 Apply Outlier Treatment", type="primary"):
                             try:
                                 original_len = len(df)
-                                
+
                                 if method == "Remove outliers":
                                     df = df[(df[outlier_col] >= lower_bound) & (df[outlier_col] <= upper_bound)]
                                     removed = original_len - len(df)
                                     st.success(f"✅ Removed {removed:,} outlier records")
-                                    
+
                                 elif method == "Cap to bounds":
                                     df[outlier_col] = np.clip(df[outlier_col], lower_bound, upper_bound)
                                     st.success(f"✅ Capped outliers in '{outlier_col}' to bounds")
-                                    
+
                                 elif method == "Winsorize":
                                     from scipy.stats import mstats
                                     df[outlier_col] = mstats.winsorize(df[outlier_col], limits=[0.05, 0.05])
                                     st.success(f"✅ Applied winsorization to '{outlier_col}'")
-                                
-                                st.session_state.df = df
-                                
+
+                                update_df(df)
+
                             except Exception as e:
                                 st.error(f"❌ Error treating outliers: {str(e)}")
 
-    with issue_tabs[3]:  # Feature Cleaning
+    with tab_cleaning:  # Feature Cleaning
         st.subheader("Feature Cleaning")
-        
+
         clean_col1, clean_col2 = st.columns(2)
-        
+
         with clean_col1:
             if st.button("🧹 Remove Constant Columns", type="secondary"):
                 constant_cols = [col for col in df.columns if df[col].nunique() <= 1]
                 if constant_cols:
                     df = df.drop(columns=constant_cols)
-                    st.session_state.df = df
+                    update_df(df)
                     st.success(f"✅ Removed {len(constant_cols)} constant columns: {', '.join(constant_cols)}")
                 else:
                     st.info("No constant columns found")
-        
+
         with clean_col2:
             if st.button("🔍 Remove High Correlation", type="secondary"):
                 numeric_df = df.select_dtypes(include=[np.number])
@@ -1939,15 +2037,88 @@ if df is not None:
                     corr_matrix = numeric_df.corr().abs()
                     upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
                     high_corr = [column for column in upper_tri.columns if any(upper_tri[column] > 0.95)]
-                    
+
                     if high_corr:
                         df = df.drop(columns=high_corr)
-                        st.session_state.df = df
+                        update_df(df)
                         st.success(f"✅ Removed {len(high_corr)} highly correlated columns")
                     else:
                         st.info("No highly correlated columns found (>0.95)")
                 else:
                     st.info("Need at least 2 numeric columns for correlation analysis")
+
+    with tab_conditional:  # Conditional Column
+        st.subheader("Conditional Column")
+
+        col1 = st.selectbox("Select first column", df.columns, key="cond_col1")
+
+        use_constant = st.checkbox("Use a constant value instead of second column?", key="cond_use_constant")
+        if use_constant:
+            value2 = st.text_input("Enter constant value", key="cond_value2")
+            try:
+                value2 = float(value2)
+            except:
+                pass
+        else:
+            col2 = st.selectbox("Select second column", df.columns, key="cond_col2")
+            value2 = df[col2]
+
+        condition = st.selectbox("Select condition", [">", "<", ">=", "<=", "==", "!="], key="cond_operator")
+
+        # Build mask safely
+        try:
+            import operator
+            ops = {">": operator.gt, "<": operator.lt, ">=": operator.ge, "<=": operator.le, "==": operator.eq, "!=": operator.ne}
+            op_func = ops[condition]
+            mask = op_func(df[col1], value2)
+            violating_rows = df[mask]
+
+            # Show results
+            if st.checkbox("👀 View matching rows", key="cond_view"):
+                if violating_rows.empty:
+                    st.info("No rows match the condition.")
+                else:
+                    st.dataframe(violating_rows, use_container_width=True)
+
+            # Action choice
+            replace_mode = st.radio("Choose action", ["Remove rows", "Replace values"], key="cond_action")
+
+            # 🔹 Move replacement input outside Apply button
+            replacement = None
+            if replace_mode == "Replace values":
+                if pd.api.types.is_numeric_dtype(df[col1]):
+                    replacement = st.number_input("Enter replacement value", key="cond_replace_value_num")
+                else:
+                    replacement = st.text_input("Enter replacement value", key="cond_replace_value_txt")
+
+            if st.button("✅ Apply", type="primary", key="cond_apply"):
+                if violating_rows.empty:
+                    st.success("✅ No rows match the condition")
+                else:
+                    if replace_mode == "Remove rows":
+                        new_df = df[~mask]
+                        update_df(new_df)
+                        st.success(f"✅ Removed {len(violating_rows)} rows based on condition '{col1} {condition} {value2}'")
+
+                    elif replace_mode == "Replace values":
+                        if replacement not in [None, ""]:
+                            new_df = df.copy()
+                            new_df.loc[mask, col1] = replacement
+                            update_df(new_df)
+                            st.success(f"✅ Replaced {len(violating_rows)} values in '{col1}' where '{col1} {condition} {value2}'")
+                        else:
+                            st.warning("⚠️ Please enter a replacement value before applying")
+
+                        if replacement != "":
+                            new_df = df.copy()
+                            new_df.loc[mask, col1] = replacement
+                            update_df(new_df)
+                            st.success(f"✅ Replaced {len(violating_rows)} values in '{col1}' where '{col1} {condition} {value2}'")
+
+        except Exception as e:
+            st.error(f"❌ Error applying conditional operation: {str(e)}")
+
+
 
     # ================================
     # Enhanced Visualizations
@@ -2108,31 +2279,6 @@ if df is not None:
             st.error(f"❌ Error creating visualization: {str(e)}")
             st.info("💡 Tip: Try selecting different columns or check for data issues")
 
-    # Quick Statistics
-    st.subheader("📈 Quick Statistics")
-    
-    if col_types['numeric']:
-        stats_col = st.selectbox("Select column for detailed statistics", col_types['numeric'])
-        
-        if stats_col:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.write("**Basic Statistics:**")
-                stats = df[stats_col].describe()
-                for stat, value in stats.items():
-                    st.write(f"• {stat.title()}: {value:.2f}")
-            
-            with col2:
-                st.write("**Additional Info:**")
-                st.write(f"• Skewness: {df[stats_col].skew():.2f}")
-                st.write(f"• Kurtosis: {df[stats_col].kurtosis():.2f}")
-                st.write(f"• Missing Values: {df[stats_col].isnull().sum():,}")
-                
-                outlier_info = detect_outliers(df, stats_col)
-                if outlier_info:
-                    outlier_count = outlier_info[0]
-                    st.write(f"• Outliers (IQR method): {outlier_count:,}")
 
     # ================================
     # Advanced Machine Learning Pipeline
@@ -2407,26 +2553,80 @@ if df is not None:
                                 st.error(f"Feature selection failed: {str(e)}")
 
                 with feature_eng_tabs[2]:  # Scaling & Encoding
-                    st.write("**Preprocessing Configuration**")
-                    
-                    preprocess_col1, preprocess_col2 = st.columns(2)
-                    
-                    with preprocess_col1:
-                        scaling_method = st.selectbox("Numeric Scaling:", 
-                                                    ["StandardScaler", "MinMaxScaler", "None"])
-                        encoding_method = st.selectbox("Categorical Encoding:", 
-                                                     ["OneHotEncoder", "OrdinalEncoder", "TargetEncoder"])
-                    
-                    with preprocess_col2:
-                        handle_missing = st.selectbox("Missing Value Strategy:", 
-                                                    ["mean", "median", "most_frequent"])
-                        datetime_features = st.checkbox("Extract datetime features", 
-                                                       value=len(col_types['datetime']) > 0)
-                    
-                    # Store preprocessing settings
-                    st.session_state.scaling_method = scaling_method
-                    st.session_state.encoding_method = encoding_method
-                    st.session_state.handle_missing = handle_missing
+                                st.write("**Preprocessing Configuration**")
+                                
+                                preprocess_col1, preprocess_col2 = st.columns(2)
+                                
+                                with preprocess_col1:
+                                                scaling_method = st.selectbox("Numeric Scaling:", 
+                                                                            ["StandardScaler", "MinMaxScaler", "RobustScaler", "None"])
+                                                encoding_method = st.selectbox("Categorical Encoding:", 
+                                                                            ["OneHotEncoder", "OrdinalEncoder", "TargetEncoder"])
+                                
+                                with preprocess_col2:
+                                                handle_missing = st.selectbox("Missing Value Strategy:", 
+                                                                            ["mean", "median", "most_frequent"])
+                                                datetime_features = st.checkbox("Extract datetime features", 
+                                                                                value=len(col_types['datetime']) > 0)
+                                
+                                # Column selection
+                                numeric_features = st.multiselect("Select numeric columns for scaling:", col_types['numeric'])
+                                categorical_features = st.multiselect("Select categorical columns for encoding:", col_types['categorical'])
+                                
+                                if st.button("✅ Apply Preprocessing"):
+                                                try:
+                                                                # Build numeric transformer
+                                                                numeric_steps = [('imputer', SimpleImputer(strategy=handle_missing))]
+                                                                if scaling_method != 'None':
+                                                                                if scaling_method == 'StandardScaler':
+                                                                                                numeric_steps.append(('scaler', StandardScaler()))
+                                                                                elif scaling_method == 'MinMaxScaler':
+                                                                                                numeric_steps.append(('scaler', MinMaxScaler()))
+                                                                                elif scaling_method == 'RobustScaler':
+                                                                                                numeric_steps.append(('scaler', RobustScaler()))
+                                                                numeric_transformer = Pipeline(numeric_steps)
+                                                                
+                                                                # Build categorical transformer
+                                                                categorical_steps = [('imputer', SimpleImputer(strategy='most_frequent', fill_value='Unknown'))]
+                                                                if encoding_method == 'OneHotEncoder':
+                                                                                categorical_steps.append(('encoder', OneHotEncoder(drop='first', sparse=False, handle_unknown='ignore')))
+                                                                elif encoding_method == 'OrdinalEncoder':
+                                                                                categorical_steps.append(('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)))
+                                                                elif encoding_method == 'TargetEncoder':
+                                                                                from category_encoders import TargetEncoder
+                                                                                categorical_steps.append(('encoder', TargetEncoder()))
+                                                                categorical_transformer = Pipeline(categorical_steps)
+                                                                
+                                                                # Combine into ColumnTransformer
+                                                                preprocessor = ColumnTransformer([
+                                                                                ('num', numeric_transformer, numeric_features),
+                                                                                ('cat', categorical_transformer, categorical_features)
+                                                                ], remainder='passthrough')
+                                                                
+                                                                # Save into session_state
+                                                                st.session_state.preprocessor = preprocessor
+                                                                st.success("✅ Preprocessing pipeline configured!")
+                                                                
+                                                                # ===== Preview transformed data =====
+                                                                transformed_data = preprocessor.fit_transform(df)
+                                                                
+                                                                # Build column names for display
+                                                                cat_cols_out = []
+                                                                if encoding_method == 'OneHotEncoder':
+                                                                                cat_cols_out = preprocessor.named_transformers_['cat']['encoder'].get_feature_names_out(categorical_features)
+                                                                elif encoding_method in ['OrdinalEncoder', 'TargetEncoder']:
+                                                                                cat_cols_out = categorical_features
+                                                                
+                                                                numeric_cols_out = numeric_features
+                                                                passthrough_cols = [c for c in df.columns if c not in numeric_features + categorical_features]
+                                                                all_cols = list(numeric_cols_out) + list(cat_cols_out) + list(passthrough_cols)
+                                                                
+                                                                transformed_df = pd.DataFrame(transformed_data, columns=all_cols)
+                                                                st.write("**Preview of Transformed Data:**")
+                                                                st.dataframe(transformed_df.head())
+                                                                
+                                                except Exception as e:
+                                                                st.error(f"Error applying preprocessing: {str(e)}")
 
         with ml_tabs[3]:  # Model Training
             st.subheader("🏋️ Advanced Model Training")
@@ -3532,7 +3732,7 @@ if probability is not None:
     # ================================
     # AI Assistant Integration
     # ================================
-    st.header("10. 🤖 AI Data Assistant")
+    st.header("10. 🤖 AI Data Assistant (Coming Soon)")
     
     # Initialize chat history
     if "chat_history" not in st.session_state:
